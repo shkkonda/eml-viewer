@@ -12,15 +12,48 @@ from email.utils import parsedate_tz, mktime_tz
 import boto3
 from botocore.exceptions import NoCredentialsError, ClientError
 
-def get_s3_client():
-    """Initialize S3 client using Streamlit secrets"""
+# Load environment variables for local development
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass  # dotenv not installed, which is fine for cloud deployment
+
+def parse_and_format_date(date_string):
+    """Parse email date and format it as DD/MM/YYYY HH:MM:SS"""
     try:
-        return boto3.client(
-            's3',
-            aws_access_key_id=st.secrets["AWS_ACCESS_KEY_ID"],
-            aws_secret_access_key=st.secrets["AWS_SECRET_ACCESS_KEY"],
-            region_name=st.secrets.get("AWS_REGION", "us-east-1")
-        )
+        # Parse the email date
+        parsed_date = parsedate_tz(date_string)
+        if parsed_date:
+            # Convert to timestamp and then to datetime
+            timestamp = mktime_tz(parsed_date)
+            dt = datetime.fromtimestamp(timestamp)
+            # Format as DD/MM/YYYY HH:MM:SS
+            return dt.strftime('%d/%m/%Y %H:%M:%S'), dt
+        else:
+            return date_string, None
+    except:
+        return date_string, None
+
+def get_s3_client():
+    """Initialize S3 client using Streamlit secrets or environment variables"""
+    try:
+        # Try Streamlit secrets first (for cloud deployment)
+        if hasattr(st, 'secrets') and 'AWS_ACCESS_KEY_ID' in st.secrets:
+            return boto3.client(
+                's3',
+                aws_access_key_id=st.secrets["AWS_ACCESS_KEY_ID"],
+                aws_secret_access_key=st.secrets["AWS_SECRET_ACCESS_KEY"],
+                region_name=st.secrets.get("AWS_REGION", "us-east-1")
+            )
+        # Fall back to environment variables (for local development)
+        else:
+            return boto3.client(
+                's3',
+                aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
+                aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
+                region_name=os.getenv("AWS_REGION", "us-east-1")
+            )
     except Exception as e:
         st.error(f"Error connecting to S3: {str(e)}")
         return None
@@ -60,20 +93,6 @@ def download_eml_from_s3(bucket_name, file_key):
     except ClientError as e:
         st.error(f"Error downloading {file_key} from S3: {str(e)}")
         return None
-    """Parse email date and format it as DD/MM/YYYY HH:MM:SS"""
-    try:
-        # Parse the email date
-        parsed_date = parsedate_tz(date_string)
-        if parsed_date:
-            # Convert to timestamp and then to datetime
-            timestamp = mktime_tz(parsed_date)
-            dt = datetime.fromtimestamp(timestamp)
-            # Format as DD/MM/YYYY HH:MM:SS
-            return dt.strftime('%d/%m/%Y %H:%M:%S'), dt
-        else:
-            return date_string, None
-    except:
-        return date_string, None
 
 def parse_s3_eml(file_content, filename):
     """Parse an EML file from S3 and extract its content."""
@@ -135,125 +154,6 @@ def parse_s3_eml(file_content, filename):
     except Exception as e:
         st.error(f"Error parsing {filename}: {str(e)}")
         return None
-    """Parse an uploaded EML file and extract its content."""
-    try:
-        msg = BytesParser(policy=policy.default).parsebytes(file_content)
-        
-        # Extract basic information
-        subject = msg.get('Subject', 'No Subject')
-        sender = msg.get('From', 'Unknown Sender')
-        recipient = msg.get('To', 'Unknown Recipient')
-        date_raw = msg.get('Date', 'Unknown Date')
-        
-        # Parse and format the date
-        date_formatted, date_obj = parse_and_format_date(date_raw)
-        
-        # Extract body content
-        body_text = ""
-        body_html = ""
-        attachments = []
-        
-        # Walk through all parts of the email
-        for part in msg.walk():
-            content_type = part.get_content_type()
-            content_disposition = str(part.get('Content-Disposition', ''))
-            
-            # Extract text and HTML body
-            if content_type == 'text/plain' and 'attachment' not in content_disposition:
-                body_text = part.get_content()
-            elif content_type == 'text/html' and 'attachment' not in content_disposition:
-                body_html = part.get_content()
-            
-            # Extract attachments
-            elif 'attachment' in content_disposition or part.get_filename():
-                attach_filename = part.get_filename()
-                if attach_filename:
-                    try:
-                        content = part.get_content()
-                        if isinstance(content, str):
-                            content = content.encode()
-                        attachments.append({
-                            'filename': attach_filename,
-                            'content': content,
-                            'content_type': content_type
-                        })
-                    except Exception as e:
-                        st.warning(f"Could not extract attachment {attach_filename}: {str(e)}")
-        
-        return {
-            'subject': subject,
-            'sender': sender,
-            'recipient': recipient,
-            'date': date_formatted,
-            'date_obj': date_obj,  # Keep datetime object for sorting
-            'body_text': body_text,
-            'body_html': body_html,
-            'attachments': attachments
-        }
-    
-    except Exception as e:
-        st.error(f"Error parsing {filename}: {str(e)}")
-        return None
-    """Parse an EML file and extract its content."""
-    try:
-        with open(file_path, 'rb') as f:
-            msg = BytesParser(policy=policy.default).parse(f)
-        
-        # Extract basic information
-        subject = msg.get('Subject', 'No Subject')
-        sender = msg.get('From', 'Unknown Sender')
-        recipient = msg.get('To', 'Unknown Recipient')
-        date_raw = msg.get('Date', 'Unknown Date')
-        
-        # Parse and format the date
-        date_formatted, date_obj = parse_and_format_date(date_raw)
-        
-        # Extract body content
-        body_text = ""
-        body_html = ""
-        attachments = []
-        
-        # Walk through all parts of the email
-        for part in msg.walk():
-            content_type = part.get_content_type()
-            content_disposition = str(part.get('Content-Disposition', ''))
-            
-            # Extract text and HTML body
-            if content_type == 'text/plain' and 'attachment' not in content_disposition:
-                body_text = part.get_content()
-            elif content_type == 'text/html' and 'attachment' not in content_disposition:
-                body_html = part.get_content()
-            
-            # Extract attachments
-            elif 'attachment' in content_disposition or part.get_filename():
-                filename = part.get_filename()
-                if filename:
-                    try:
-                        content = part.get_content()
-                        if isinstance(content, str):
-                            content = content.encode()
-                        attachments.append({
-                            'filename': filename,
-                            'content': content,
-                            'content_type': content_type
-                        })
-                    except Exception as e:
-                        st.warning(f"Could not extract attachment {filename}: {str(e)}")
-        
-        return {
-            'subject': subject,
-            'sender': sender,
-            'recipient': recipient,
-            'date': date_formatted,
-            'date_obj': date_obj,  # Keep datetime object for sorting
-            'body_text': body_text,
-            'body_html': body_html,
-            'attachments': attachments
-        }
-    
-    except Exception as e:
-        st.error(f"Error parsing {file_path}: {str(e)}")
-        return None
 
 def clean_html(html_content):
     """Clean HTML content for safe display."""
@@ -291,11 +191,23 @@ def main():
     
     # S3 Configuration
     try:
-        bucket_name = st.secrets["S3_BUCKET_NAME"]
-        folder_prefix = st.secrets.get("S3_FOLDER_PREFIX", "")  # Optional folder path in S3
-    except KeyError as e:
-        st.error(f"Missing S3 configuration in secrets: {str(e)}")
-        st.info("Please configure S3_BUCKET_NAME, AWS_ACCESS_KEY_ID, and AWS_SECRET_ACCESS_KEY in Streamlit secrets")
+        # Try Streamlit secrets first (cloud), then environment variables (local)
+        if hasattr(st, 'secrets') and 'S3_BUCKET_NAME' in st.secrets:
+            bucket_name = st.secrets["S3_BUCKET_NAME"]
+            folder_prefix = st.secrets.get("S3_FOLDER_PREFIX", "")
+        else:
+            bucket_name = os.getenv("S3_BUCKET_NAME")
+            folder_prefix = os.getenv("S3_FOLDER_PREFIX", "")
+            
+        if not bucket_name:
+            raise ValueError("S3_BUCKET_NAME not found")
+            
+    except Exception as e:
+        st.error(f"Missing S3 configuration: {str(e)}")
+        st.info("""
+        **For Streamlit Cloud:** Configure secrets in app settings  
+        **For Local Development:** Set environment variables or use .env file
+        """)
         return
     
     # Get EML files from S3
