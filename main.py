@@ -11,6 +11,10 @@ import pandas as pd
 from email.utils import parsedate_tz, mktime_tz
 import boto3
 from botocore.exceptions import NoCredentialsError, ClientError
+import concurrent.futures
+import threading
+from concurrent.futures import ThreadPoolExecutor
+import hashlib
 
 # Load environment variables for local development
 try:
@@ -18,6 +22,58 @@ try:
     load_dotenv()
 except ImportError:
     pass  # dotenv not installed, which is fine for cloud deployment
+
+def check_authentication():
+    """Check if user is authenticated"""
+    return st.session_state.get('authenticated', False)
+
+def authenticate_user(username, password):
+    """Authenticate user with username and password"""
+    try:
+        # Try Streamlit secrets first (cloud), then environment variables (local)
+        if hasattr(st, 'secrets') and 'AUTH_USERNAME' in st.secrets:
+            stored_username = st.secrets["AUTH_USERNAME"]
+            stored_password = st.secrets["AUTH_PASSWORD"]
+        else:
+            stored_username = os.getenv("AUTH_USERNAME")
+            stored_password = os.getenv("AUTH_PASSWORD")
+        
+        if not stored_username or not stored_password:
+            st.error("Authentication not configured. Please set AUTH_USERNAME and AUTH_PASSWORD.")
+            return False
+        
+        # Simple authentication check
+        if username == stored_username and password == stored_password:
+            st.session_state['authenticated'] = True
+            return True
+        else:
+            return False
+    except Exception as e:
+        st.error(f"Authentication error: {str(e)}")
+        return False
+
+def login_form():
+    """Display login form"""
+    st.title("🔐 EML File Viewer - Login")
+    st.markdown("---")
+    
+    with st.form("login_form"):
+        st.markdown("### Please enter your credentials")
+        username = st.text_input("Username")
+        password = st.text_input("Password", type="password")
+        submit_button = st.form_submit_button("Login")
+        
+        if submit_button:
+            if authenticate_user(username, password):
+                st.success("Login successful!")
+                st.rerun()
+            else:
+                st.error("Invalid username or password")
+
+def logout():
+    """Logout user"""
+    st.session_state['authenticated'] = False
+    st.rerun()
 
 def parse_and_format_date(date_string):
     """Parse email date and format it as DD/MM/YYYY HH:MM:SS"""
@@ -138,7 +194,8 @@ def parse_s3_eml(file_content, filename):
                             'content_type': content_type
                         })
                     except Exception as e:
-                        st.warning(f"Could not extract attachment {attach_filename}: {str(e)}")
+                        # Use a placeholder for failed attachments instead of showing error
+                        pass
         
         return {
             'subject': subject,
@@ -152,8 +209,62 @@ def parse_s3_eml(file_content, filename):
         }
     
     except Exception as e:
-        st.error(f"Error parsing {filename}: {str(e)}")
         return None
+
+def process_single_email(bucket_name, file_key):
+    """Process a single email file - for parallel processing"""
+    try:
+        file_content = download_eml_from_s3(bucket_name, file_key)
+        if file_content:
+            return parse_s3_eml(file_content, file_key)
+        return None
+    except Exception as e:
+        return None
+
+def process_emails_parallel(bucket_name, eml_files, max_workers=5):
+    """Process emails in parallel using ThreadPoolExecutor"""
+    all_emails_data = []
+    max_attachments = 0
+    
+    # Create progress tracking
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
+    # Use ThreadPoolExecutor for parallel processing
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Submit all tasks
+        future_to_file = {
+            executor.submit(process_single_email, bucket_name, file_key): file_key 
+            for file_key in eml_files
+        }
+        
+        completed = 0
+        total = len(eml_files)
+        
+        # Process completed tasks
+        for future in concurrent.futures.as_completed(future_to_file):
+            file_key = future_to_file[future]
+            completed += 1
+            
+            # Update progress
+            progress_bar.progress(completed / total)
+            status_text.text(f"Processed {completed}/{total} files...")
+            
+            try:
+                email_data = future.result()
+                if email_data is not None:
+                    all_emails_data.append(email_data)
+                    # Track maximum number of attachments for table columns
+                    if len(email_data['attachments']) > max_attachments:
+                        max_attachments = len(email_data['attachments'])
+            except Exception as e:
+                # Silently skip failed emails
+                pass
+    
+    progress_bar.empty()
+    status_text.empty()
+    
+    return all_emails_data, max_attachments
 
 def clean_html(html_content):
     """Clean HTML content for safe display."""
@@ -186,7 +297,19 @@ def main():
         layout="wide"
     )
     
-    st.title("📧 EML File Viewer")
+    # Check authentication
+    if not check_authentication():
+        login_form()
+        return
+    
+    # Main app header with logout button
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        st.title("📧 EML File Viewer")
+    with col2:
+        if st.button("🚪 Logout", type="secondary"):
+            logout()
+    
     st.markdown("---")
     
     # S3 Configuration
@@ -195,9 +318,11 @@ def main():
         if hasattr(st, 'secrets') and 'S3_BUCKET_NAME' in st.secrets:
             bucket_name = st.secrets["S3_BUCKET_NAME"]
             folder_prefix = st.secrets.get("S3_FOLDER_PREFIX", "")
+            max_workers = st.secrets.get("MAX_WORKERS", 5)
         else:
             bucket_name = os.getenv("S3_BUCKET_NAME")
             folder_prefix = os.getenv("S3_FOLDER_PREFIX", "")
+            max_workers = int(os.getenv("MAX_WORKERS", 5))
             
         if not bucket_name:
             raise ValueError("S3_BUCKET_NAME not found")
@@ -221,30 +346,18 @@ def main():
     
     st.success(f"Found {len(eml_files)} EML files in S3")
     
-    # Parse all emails first
-    all_emails_data = []
-    max_attachments = 0
+    # Add processing options
+    col1, col2 = st.columns(2)
+    with col1:
+        st.info(f"🚀 Using parallel processing with {max_workers} workers")
+    with col2:
+        if st.button("🔄 Refresh Data"):
+            st.cache_data.clear()
+            st.rerun()
     
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-    
-    for i, file_key in enumerate(eml_files):
-        status_text.text(f"Processing {file_key}...")
-        progress_bar.progress((i + 1) / len(eml_files))
-        
-        # Download and parse EML file from S3
-        file_content = download_eml_from_s3(bucket_name, file_key)
-        if file_content:
-            email_data = parse_s3_eml(file_content, file_key)
-            
-            if email_data is not None:
-                all_emails_data.append(email_data)
-                # Track maximum number of attachments for table columns
-                if len(email_data['attachments']) > max_attachments:
-                    max_attachments = len(email_data['attachments'])
-    
-    progress_bar.empty()
-    status_text.empty()
+    # Process emails in parallel
+    with st.spinner("Processing emails in parallel..."):
+        all_emails_data, max_attachments = process_emails_parallel(bucket_name, eml_files, max_workers)
     
     if not all_emails_data:
         st.error("Could not parse any EML files.")
@@ -252,6 +365,16 @@ def main():
     
     # Sort emails by date (latest first) - handle None dates
     all_emails_data.sort(key=lambda x: x['date_obj'] if x['date_obj'] else datetime.min, reverse=True)
+    
+    # Display summary statistics
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("📧 Total Emails", len(all_emails_data))
+    with col2:
+        total_attachments = sum(len(email['attachments']) for email in all_emails_data)
+        st.metric("📎 Total Attachments", total_attachments)
+    with col3:
+        st.metric("📁 Max Attachments per Email", max_attachments)
     
     # Create table data
     table_data = []
