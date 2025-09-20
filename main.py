@@ -346,14 +346,8 @@ def main():
     
     st.success(f"Found {len(eml_files)} EML files in S3")
     
-    # Add processing options
-    col1, col2 = st.columns(2)
-    with col1:
-        st.info(f"🚀 Using parallel processing with {max_workers} workers")
-    with col2:
-        if st.button("🔄 Refresh Data"):
-            st.cache_data.clear()
-            st.rerun()
+    # Add processing info
+    st.info(f"🚀 Using parallel processing with {max_workers} workers")
     
     # Process emails in parallel
     with st.spinner("Processing emails in parallel..."):
